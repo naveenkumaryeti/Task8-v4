@@ -27,11 +27,11 @@ name: CI — Build, Test, Scan, Push
 on:
   push:
     branches:
-      - main
+      - master
       - develop
   pull_request:
     branches:
-      - main
+      - master
   workflow_dispatch:
     inputs:
       version:

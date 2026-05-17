@@ -32,7 +32,7 @@ on:
     types:
       - completed
     branches:
-      - main
+      - master
 
   # Allow manual trigger with custom version
   workflow_dispatch:
@@ -107,7 +107,7 @@ jobs:
         run: |
           if [ -n "${{ github.event.inputs.version }}" ]; then
             VERSION="${{ github.event.inputs.version }}"
-          elif [[ "${{ github.event.workflow_run.head_branch }}" == "main" ]]; then
+          elif [[ "${{ github.event.workflow_run.head_branch }}" == "master" ]]; then
             # Use the SHA from the CI run
             SHA="${{ github.event.workflow_run.head_sha }}"
             VERSION="sha-$(echo $SHA | cut -c1-7)"
