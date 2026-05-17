@@ -1,0 +1,82 @@
+global:
+  enabled: true
+  tlsDisable: true     # Disable TLS for simplicity (enable in strict-prod)
+
+injector:
+  # Vault Agent Injector watches for vault.hashicorp.com/* annotations
+  # on pods and injects an init container that fetches secrets from Vault.
+  enabled: true
+  replicas: 2          # HA injector
+  logLevel: info
+
+  resources:
+    requests:
+      memory: "64Mi"
+      cpu: "50m"
+    limits:
+      memory: "128Mi"
+      cpu: "250m"
+
+  webhook:
+    # Fail open so Vault downtime doesn't block all pod creation
+    failurePolicy: Ignore
+
+server:
+  image:
+    repository: "hashicorp/vault"
+    tag: "1.19.0"
+
+  resources:
+    requests:
+      memory: "256Mi"
+      cpu: "250m"
+    limits:
+      memory: "512Mi"
+      cpu: "500m"
+
+  standalone:
+    enabled: true
+    config: |
+      ui = true
+
+      listener "tcp" {
+        tls_disable = 1
+        address     = "[::]:8200"
+        cluster_address = "[::]:8201"
+      }
+
+      # File storage (suitable for single-node; use GCS for HA production)
+      storage "file" {
+        path = "/vault/data"
+      }
+
+      # NOTE: gcpckms auto-unseal is defined in vault/vault-install.yaml.
+      # To enable it, ensure your GCP KMS key ring and key exist first:
+      #   gcloud kms keyrings create vault-keyring --location=asia-south1
+      #   gcloud kms keys create vault-unseal-key \
+      #     --keyring=vault-keyring --location=asia-south1 \
+      #     --purpose=encryption
+      # Then copy the seal block from vault/vault-install.yaml into this file.
+      disable_mlock = true
+
+  dataStorage:
+    enabled: true
+    size: 10Gi
+    storageClass: standard-rwo   # GKE standard persistent disk (ReadWriteOnce)
+    accessMode: ReadWriteOnce
+
+  readinessProbe:
+    enabled: true
+    path: "/v1/sys/health?standbyok=true"
+
+  livenessProbe:
+    enabled: true
+    path: "/v1/sys/health?standbyok=true"
+    initialDelaySeconds: 60
+
+ui:
+  enabled: true
+  serviceType: ClusterIP   # Access via port-forward (LoadBalancer = public exposure)
+
+csi:
+  enabled: false

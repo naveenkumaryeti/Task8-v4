@@ -1,0 +1,90 @@
+# ============================================================
+# vault-auth.yaml
+#
+# Configures Vault's Kubernetes authentication method.
+# This allows Kubernetes pods to authenticate with Vault using their
+# ServiceAccount JWT tokens — NO static passwords needed.
+#
+# Flow:
+#   Pod starts → Vault Agent reads /var/run/secrets/kubernetes.io/serviceaccount/token
+#   → Sends JWT to Vault → Vault validates with Kubernetes API
+#   → Returns Vault token → Agent uses token to fetch secrets
+#
+# Apply after Vault is initialized:
+#   kubectl apply -f vault/vault-auth.yaml
+# ============================================================
+
+# ── ServiceAccount for Vault Auth ─────────────────────────────────────────────
+# Each component gets its own SA for granular access control.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: vault-auth-sa
+  namespace: production
+  labels:
+    app: vault-auth
+  annotations:
+    # This SA is used by pods to authenticate with Vault
+    vault.hashicorp.com/role: "app-role"
+
+---
+# ── ClusterRoleBinding: Allow Vault to validate SA tokens ─────────────────────
+# Vault's Kubernetes auth needs to call the TokenReview API
+# to verify that a pod's service account token is legitimate.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: vault-token-review-binding
+  labels:
+    app: vault-auth
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:auth-delegator    # Built-in role for token validation
+subjects:
+  - kind: ServiceAccount
+    name: vault-auth-sa
+    namespace: production
+
+---
+# ── Vault Auth Configuration Script (run as a Job or manually) ───────────────
+# The actual Vault auth configuration is done via vault CLI commands,
+# captured here as a reference. See scripts/deploy-vault.sh for automation.
+#
+# Commands to run after vault is unsealed:
+#
+#   # Enable Kubernetes auth method
+#   vault auth enable kubernetes
+#
+#   # Configure with GKE cluster details
+#   vault write auth/kubernetes/config \
+#     kubernetes_host="https://$KUBERNETES_PORT_443_TCP_ADDR:443" \
+#     token_reviewer_jwt="$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)" \
+#     kubernetes_ca_cert=@/var/run/secrets/kubernetes.io/serviceaccount/ca.crt \
+#     issuer="https://kubernetes.default.svc.cluster.local"
+#
+#   # Create role for backend pods
+#   vault write auth/kubernetes/role/app-role \
+#     bound_service_account_names=vault-auth-sa \
+#     bound_service_account_namespaces=production \
+#     policies=app-backend-policy \
+#     ttl=1h
+#
+#   # Create role for MySQL pod
+#   vault write auth/kubernetes/role/mysql-role \
+#     bound_service_account_names=vault-auth-sa \
+#     bound_service_account_namespaces=production \
+#     policies=mysql-policy \
+#     ttl=1h
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vault-auth-config
+  namespace: production
+  labels:
+    app: vault-auth
+data:
+  vault-addr: "http://vault.vault.svc.cluster.local:8200"
+  vault-role: "app-role"
+  vault-auth-path: "auth/kubernetes/login"

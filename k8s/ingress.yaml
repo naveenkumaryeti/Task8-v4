@@ -1,0 +1,80 @@
+# ============================================================
+# ingress.yaml
+#
+# NGINX Ingress Controller configuration.
+#
+# Traffic flow:
+#   Internet → GCP Load Balancer → Ingress Controller → Service → Pods
+#
+# Install NGINX Ingress Controller first:
+#   kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/main/deploy/static/provider/cloud/deploy.yaml
+#
+# For GKE, alternatively use GKE-managed Ingress (GCP Load Balancer directly).
+# That requires annotation: kubernetes.io/ingress.class: "gce"
+# ============================================================
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: app-ingress
+  namespace: production
+  labels:
+    app: enterprise-app
+  annotations:
+    # Use NGINX Ingress Controller (not GKE native)
+    kubernetes.io/ingress.class: "nginx"
+
+    # ── SSL/TLS ────────────────────────────────────────────────────────────
+    # cert-manager will auto-provision and renew Let's Encrypt certificates
+    # Install cert-manager: https://cert-manager.io/docs/installation/
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+
+    # ── NGINX Tuning ──────────────────────────────────────────────────────
+    nginx.ingress.kubernetes.io/proxy-body-size: "10m"
+    nginx.ingress.kubernetes.io/proxy-connect-timeout: "10"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "60"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "60"
+
+    # Rate limiting at the Ingress level (defense in depth — app also rate limits)
+    nginx.ingress.kubernetes.io/limit-rps: "50"
+
+    # Force HTTPS redirect
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+
+    # Enable CORS if needed (can also be done at app level)
+    nginx.ingress.kubernetes.io/enable-cors: "false"
+
+spec:
+  # ── TLS Certificate ──────────────────────────────────────────────────────
+  tls:
+    - hosts:
+        - yourdomain.com
+        - www.yourdomain.com
+      secretName: app-tls-cert    # cert-manager creates/manages this Secret
+
+  # ── Routing Rules ──────────────────────────────────────────────────────────
+  rules:
+    # ── Primary domain ────────────────────────────────────────────────────
+    - host: yourdomain.com
+      http:
+        paths:
+          # All traffic goes to frontend (Nginx serves static + proxies /api/*)
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: frontend-service
+                port:
+                  name: http
+
+    # ── www subdomain redirect (handled by Ingress NGINX rewrite) ─────────
+    - host: www.yourdomain.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: frontend-service
+                port:
+                  name: http
