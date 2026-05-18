@@ -12,7 +12,7 @@
 set -euo pipefail
 
 VERSION="${1:-${APP_VERSION:-1.0.0}}"
-PROJECT_ID="${GCP_PROJECT_ID:-gcp-b2-devops-naveen}"
+PROJECT_ID="${GCP_PROJECT_ID:-naveen-devops-cicd}"
 REGION="${GCP_REGION:-asia-south1}"
 REPO_NAME="${GAR_REPO_NAME:-prod-repo}"
 REGISTRY="${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO_NAME}"

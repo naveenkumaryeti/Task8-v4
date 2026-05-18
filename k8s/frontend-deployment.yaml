@@ -25,10 +25,10 @@
 #       the spread constraint across 2 nodes. ScheduleAnyway keeps the intent without blocking.
 #   [7] preStop lifecycle hook — drains in-flight requests before SIGTERM.
 #   [8] version label removed from pod template — triggers unnecessary pod churn on each deploy.
-#   [9] GCP_PROJECT_ID placeholder replaced with real project ID: gcp-b2-devops-naveen.
+#   [9] GCP_PROJECT_ID placeholder replaced with real project ID: naveen-devops-cicd.
 #
 # DEPLOY SCRIPT REQUIREMENTS (deploy-k8s.sh):
-#   1. export GCP_PROJECT_ID=gcp-b2-devops-naveen   (or set in CI/CD environment)
+#   1. export GCP_PROJECT_ID=naveen-devops-cicd   (or set in CI/CD environment)
 #   2. Add guard at top: : "${GCP_PROJECT_ID:?GCP_PROJECT_ID is not set}"
 #   3. Apply nginx ConfigMap before frontend deployment:
 #        kubectl apply -f k8s/nginx-configmap.yaml -n "$NAMESPACE"
@@ -105,7 +105,7 @@ spec:
       containers:
         - name: nginx
           # FIX [9]: Real project ID — was placeholder "your-gcp-project-id" / "YOUR_PROJECT_ID"
-          image: asia-south1-docker.pkg.dev/gcp-b2-devops-naveen/prod-repo/frontend:1.0.0
+          image: asia-south1-docker.pkg.dev/naveen-devops-cicd/prod-repo/frontend:1.0.0
 
           # FIX [3]: IfNotPresent — correct for pinned immutable tags like 1.0.0.
           # "Always" only makes sense with mutable tags (e.g. "latest") and adds

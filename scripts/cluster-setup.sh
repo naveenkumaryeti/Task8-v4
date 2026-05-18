@@ -17,7 +17,7 @@ set -euo pipefail   # Exit on error, undefined var, pipe failure
 IFS=$'\n\t'
 
 # ── Configuration ─────────────────────────────────────────────────────────────
-PROJECT_ID="${GCP_PROJECT_ID:-gcp-b2-devops-naveen}"
+PROJECT_ID="${GCP_PROJECT_ID:-naveen-devops-cicd}"
 CLUSTER_NAME="${GKE_CLUSTER_NAME:-gke-microservices}"
 REGION="${GCP_REGION:-asia-south1}"
 ZONE="${GCP_ZONE:-asia-south1-a}"

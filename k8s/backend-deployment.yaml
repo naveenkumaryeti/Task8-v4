@@ -128,7 +128,7 @@ spec:
 
       containers:
         - name: backend
-          image: asia-south1-docker.pkg.dev/gcp-b2-devops-naveen/prod-repo/backend:1.0.0
+          image: asia-south1-docker.pkg.dev/naveen-devops-cicd/prod-repo/backend:1.0.0
 
           # FIX [2]: IfNotPresent — correct for pinned immutable tags like 1.0.0.
           # "Always" causes unnecessary registry round-trips on every pod restart.

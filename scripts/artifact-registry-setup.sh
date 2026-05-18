@@ -11,7 +11,7 @@
 
 set -euo pipefail
 
-PROJECT_ID="${GCP_PROJECT_ID:-gcp-b2-devops-naveen}"
+PROJECT_ID="${GCP_PROJECT_ID:-naveen-devops-cicd}"
 REGION="${GCP_REGION:-asia-south1}"
 REPO_NAME="${GAR_REPO_NAME:-prod-repo}"
 
