@@ -1,19 +1,12 @@
 # ============================================================
 # mysql-deployment.yaml
 #
-# MySQL deployed as a StatefulSet (not Deployment) because:
-#   - StatefulSet gives stable, predictable pod names (mysql-0)
-#   - PVC binding is stable across pod restarts
-#   - Ordered startup/shutdown (critical for clustered DBs)
-#
-# Secret injection:
-#   Vault Agent Injector automatically injects an init container, sidecar,
-#   and /vault/secrets volume based on the annotations below.
-#   Do NOT manually define vault-secrets volume or its mounts — the
-#   injector webhook adds them at admission time, causing duplicate errors.
+# MySQL StatefulSet with Vault secret injection
 # ============================================================
+
 apiVersion: apps/v1
 kind: StatefulSet
+
 metadata:
   name: mysql
   namespace: production
@@ -21,9 +14,10 @@ metadata:
     app: mysql
     tier: database
     version: "8.0"
+
 spec:
-  serviceName: "mysql-service"
-  replicas: 1                      # Single MySQL instance (scale via MySQL Group Replication for HA)
+  serviceName: mysql-service
+  replicas: 1
 
   selector:
     matchLabels:
@@ -34,48 +28,56 @@ spec:
       labels:
         app: mysql
         tier: database
+
       annotations:
-        # ── Vault Agent Injector Annotations ──────────────────────────────────
-        # These tell the Vault Agent Injector sidecar to fetch secrets
-        # and inject them as environment variables into the pod.
-        # The injector automatically adds:
-        #   - An init container (vault-agent-init) that fetches secrets
-        #   - A sidecar container (vault-agent) that renews leases
-        #   - A vault-secrets emptyDir volume mounted at /vault/secrets
-        # Do NOT redeclare any of the above manually.
         vault.hashicorp.com/agent-inject: "true"
         vault.hashicorp.com/role: "mysql-role"
 
-        # Fetch MySQL root password from Vault path secret/data/mysql
+        vault.hashicorp.com/agent-init-first: "true"
+
+        vault.hashicorp.com/agent-requests-cpu: "50m"
+        vault.hashicorp.com/agent-requests-mem: "64Mi"
+
+        vault.hashicorp.com/agent-limits-cpu: "100m"
+        vault.hashicorp.com/agent-limits-mem: "128Mi"
+
         vault.hashicorp.com/agent-inject-secret-db-root: "secret/data/mysql"
+
         vault.hashicorp.com/agent-inject-template-db-root: |
           {{- with secret "secret/data/mysql" -}}
           export MYSQL_ROOT_PASSWORD="{{ .Data.data.root_password }}"
           export MYSQL_PASSWORD="{{ .Data.data.app_password }}"
-          export MYSQL_USER="appuser"
+          export MYSQL_USER="{{ .Data.data.app_user }}"
           {{- end }}
 
-    spec:
-      serviceAccountName: vault-auth-sa   # SA bound to Vault Kubernetes auth role
+        # Removed: vault.hashicorp.com/secret-volume-path
+        # /vault/secrets is the default; the injector webhook owns this volume.
 
-      # ── Init Containers ───────────────────────────────────────────────────
-      # NOTE: The Vault injector adds its own init container (vault-agent-init)
-      # automatically. A manual wait-for-vault init container is not needed —
-      # the injector's init container blocks until secrets are written before
-      # any app container or subsequent init container starts.
+    spec:
+      serviceAccountName: vault-auth-sa
 
       containers:
         - name: mysql
           image: mysql:8.0
           imagePullPolicy: IfNotPresent
 
-          # Source Vault-injected credentials then hand off to mysqld.
-          # Using && ensures env vars are exported into the same shell
-          # that execs mysqld — not a subshell that gets discarded.
           command:
             - sh
             - -c
-            - source /vault/secrets/db-root && exec docker-entrypoint.sh mysqld
+            - |
+              if [ ! -s /vault/secrets/db-root ]; then
+                echo "ERROR: /vault/secrets/db-root is empty or missing. Vault injection failed." >&2
+                exit 1
+              fi
+
+              source /vault/secrets/db-root
+
+              if [ -z "$MYSQL_ROOT_PASSWORD" ]; then
+                echo "ERROR: MYSQL_ROOT_PASSWORD is empty after sourcing Vault secrets." >&2
+                exit 1
+              fi
+
+              exec docker-entrypoint.sh mysqld
 
           env:
             - name: MYSQL_DATABASE
@@ -83,48 +85,34 @@ spec:
                 configMapKeyRef:
                   name: mysql-config
                   key: MYSQL_DATABASE
-            # MYSQL_ROOT_PASSWORD and MYSQL_PASSWORD are sourced from
-            # /vault/secrets/db-root via the command above — NOT from env directly.
-            # This avoids secrets appearing in `kubectl describe pod` output.
 
           ports:
             - name: mysql
               containerPort: 3306
-              protocol: TCP
 
-          # ── Resource Limits ────────────────────────────────────────────────
-          # Requests: guaranteed allocation (scheduler uses this)
-          # Limits: hard cap (OOMKill if exceeded)
           resources:
             requests:
-              cpu: "250m"        # 0.25 vCPU guaranteed
-              memory: "512Mi"    # 512MB guaranteed
+              cpu: "250m"
+              memory: "512Mi"
             limits:
-              cpu: "1000m"       # Max 1 vCPU
-              memory: "1Gi"      # Max 1GB — MySQL killed if exceeded
+              cpu: "1"
+              memory: "1Gi"
 
-          # ── Liveness Probe ─────────────────────────────────────────────────
-          # Only checks if mysqld process is alive — NOT query performance.
-          # Pod is restarted if this fails 3 times.
-          livenessProbe:
-            exec:
-              command:
-                - mysqladmin
-                - ping
-                - -h
-                - localhost
-                - --silent
-            initialDelaySeconds: 30   # MySQL takes time to initialize
-            periodSeconds: 10
-            timeoutSeconds: 5
-            failureThreshold: 3
+          volumeMounts:
+            - name: mysql-data
+              mountPath: /var/lib/mysql
 
-          # ── Readiness Probe ────────────────────────────────────────────────
-          # Checks if MySQL can accept connections.
-          # Traffic is withheld until this passes.
-          # NOTE: mysqladmin ping does not require credentials and is sufficient
-          # for readiness. Probe exec runs in a separate process and does not
-          # inherit env vars sourced in the container's command above.
+            - name: mysql-config-vol
+              mountPath: /etc/mysql/conf.d/custom.cnf
+              subPath: my.cnf
+
+            - name: mysql-config-vol
+              mountPath: /docker-entrypoint-initdb.d/init.sql
+              subPath: init.sql
+
+            # Removed: vault-secrets volumeMount — injected automatically by the
+            # Vault webhook into /vault/secrets on all containers.
+
           readinessProbe:
             exec:
               command:
@@ -138,23 +126,18 @@ spec:
             timeoutSeconds: 5
             failureThreshold: 3
 
-          volumeMounts:
-            # Persistent data directory
-            - name: mysql-data
-              mountPath: /var/lib/mysql
-
-            # MySQL config file from ConfigMap
-            - name: mysql-config-vol
-              mountPath: /etc/mysql/conf.d/custom.cnf
-              subPath: my.cnf
-
-            # Init SQL from ConfigMap
-            - name: mysql-config-vol
-              mountPath: /docker-entrypoint-initdb.d/init.sql
-              subPath: init.sql
-
-            # /vault/secrets is mounted automatically by the Vault injector.
-            # Do NOT add a manual volumeMount for it here.
+          livenessProbe:
+            exec:
+              command:
+                - mysqladmin
+                - ping
+                - -h
+                - localhost
+                - --silent
+            initialDelaySeconds: 60
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
 
       volumes:
         - name: mysql-data
@@ -165,10 +148,6 @@ spec:
           configMap:
             name: mysql-config
 
-        # vault-secrets volume is injected automatically by the Vault webhook.
-        # Do NOT declare it here — doing so causes a duplicate volume error
-        # and prevents the StatefulSet from creating any pods.
-
-  # ── Update Strategy ────────────────────────────────────────────────────────
-  updateStrategy:
-    type: RollingUpdate
+        # Removed: vault-secrets emptyDir volume — owned and injected by the
+        # Vault agent injector webhook. Declaring it manually causes a duplicate
+        # volume conflict (spec.volumes[n].name: Duplicate value: "vault-secrets").

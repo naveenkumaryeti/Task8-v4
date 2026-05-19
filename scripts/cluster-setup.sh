@@ -32,6 +32,22 @@ log()  { echo -e "${GREEN}[$(date +'%H:%M:%S')] ✓ $*${NC}"; }
 warn() { echo -e "${YELLOW}[$(date +'%H:%M:%S')] ⚠ $*${NC}"; }
 fail() { echo -e "${RED}[$(date +'%H:%M:%S')] ✗ $*${NC}"; exit 1; }
 
+# ── Helper: detect current public IPv4 ───────────────────────────────────────
+# Uses -4 flag to force IPv4 on all curl calls (avoids IPv6 being returned,
+# which GKE master-authorized-networks rejects).
+detect_ipv4() {
+  local ip
+  ip=$(
+    curl -sf -4 --max-time 5 https://checkip.amazonaws.com ||
+    curl -sf -4 --max-time 5 https://ifconfig.me          ||
+    curl -sf -4 --max-time 5 https://api4.my-ip.io/ip     ||
+    echo ""
+  )
+  # Trim whitespace/newlines
+  ip="${ip//[$'\t\r\n ']}"
+  echo "$ip"
+}
+
 # ── Validate prerequisites ────────────────────────────────────────────────────
 log "Validating prerequisites..."
 command -v gcloud >/dev/null 2>&1 || fail "gcloud CLI not found."
@@ -53,24 +69,17 @@ gcloud services enable \
   secretmanager.googleapis.com \
   --quiet
 
-# ── Auto-detect public IP ─────────────────────────────────────────────────────
+# ── Auto-detect public IPv4 ───────────────────────────────────────────────────
 # This IP is whitelisted so your machine can reach the private cluster API.
 # Override at runtime:  MY_PUBLIC_IP=1.2.3.4 bash scripts/cluster-setup.sh
 if [[ -z "${MY_PUBLIC_IP:-}" ]]; then
   log "Auto-detecting public IP for master authorized networks..."
-  MY_PUBLIC_IP=$(
-    curl -sf --max-time 5 https://checkip.amazonaws.com ||
-    curl -sf --max-time 5 https://ifconfig.me ||
-    curl -sf --max-time 5 https://api4.my-ip.io/ip ||
-    echo ""
-  )
-  # Trim whitespace/newlines
-  MY_PUBLIC_IP="${MY_PUBLIC_IP//[$'\t\r\n ']}"
+  MY_PUBLIC_IP=$(detect_ipv4)
 fi
 
 # Validate it looks like an IPv4 address
 if [[ ! "$MY_PUBLIC_IP" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
-  fail "Could not detect a valid public IP (got: '${MY_PUBLIC_IP:-empty}'). Set it manually: MY_PUBLIC_IP=1.2.3.4 bash $0"
+  fail "Could not detect a valid public IPv4 (got: '${MY_PUBLIC_IP:-empty}'). Set it manually: MY_PUBLIC_IP=1.2.3.4 bash $0"
 fi
 
 log "Public IP detected: $MY_PUBLIC_IP — will be whitelisted for cluster API access"
@@ -107,6 +116,25 @@ else
     --labels="environment=production,team=devops,managed-by=gcloud" \
     --quiet
   log "Cluster created successfully!"
+
+  # ── Re-check IP after provisioning ─────────────────────────────────────────
+  # Cluster creation takes ~6 minutes. Dynamic ISP IPs (common in India) can
+  # rotate in that window. Re-detect and update authorized networks if changed.
+  log "Re-checking public IP after cluster provisioning..."
+  POST_CREATE_IP=$(detect_ipv4)
+
+  if [[ "$POST_CREATE_IP" != "$MY_PUBLIC_IP" ]]; then
+    warn "IP changed during provisioning ($MY_PUBLIC_IP → $POST_CREATE_IP). Updating master authorized networks..."
+    gcloud container clusters update "$CLUSTER_NAME" \
+      --zone="$ZONE" \
+      --enable-master-authorized-networks \
+      --master-authorized-networks="${POST_CREATE_IP}/32" \
+      --quiet
+    log "Master authorized networks updated to $POST_CREATE_IP"
+    MY_PUBLIC_IP="$POST_CREATE_IP"
+  else
+    log "IP unchanged ($MY_PUBLIC_IP) — no update needed"
+  fi
 fi
 
 # ── Configure kubectl context ─────────────────────────────────────────────────
