@@ -46,10 +46,10 @@ concurrency:
 
 env:
   # These are safe to define here (non-secret)
-  GCP_REGION:    ${{ secrets.GCP_REGION }}
+  GCP_REGION:     ${{ secrets.GCP_REGION }}
   GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
-  GAR_REPO_NAME: ${{ secrets.GAR_REPO_NAME || 'prod-repo' }}
-  REGISTRY: ${{ secrets.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ secrets.GAR_REPO_NAME || 'prod-repo' }}
+  GAR_REPO_NAME:  ${{ secrets.GAR_REPO_NAME || 'prod-repo' }}
+  REGISTRY:       ${{ secrets.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ secrets.GAR_REPO_NAME || 'prod-repo' }}
 
 permissions:
   contents: read
@@ -67,10 +67,10 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v5
+        uses: actions/checkout@v4
 
       - name: Set up Node.js
-        uses: actions/setup-node@v5
+        uses: actions/setup-node@v4
         with:
           node-version: '18'
           cache: 'npm'
@@ -92,7 +92,7 @@ jobs:
           NODE_ENV: test
 
       - name: Upload test coverage
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v4
         if: always()
         with:
           name: coverage-report
@@ -110,13 +110,13 @@ jobs:
 
     # Compute version from git tag, input, or commit SHA
     outputs:
-      version: ${{ steps.version.outputs.version }}
+      version:        ${{ steps.version.outputs.version }}
       frontend_image: ${{ steps.version.outputs.frontend_image }}
-      backend_image: ${{ steps.version.outputs.backend_image }}
+      backend_image:  ${{ steps.version.outputs.backend_image }}
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v5
+        uses: actions/checkout@v4
 
       # ── Compute image version ──────────────────────────────────────────────
       - name: Compute version tag
@@ -134,7 +134,7 @@ jobs:
           FRONTEND_IMAGE="${{ env.REGISTRY }}/frontend:${VERSION}"
           BACKEND_IMAGE="${{ env.REGISTRY }}/backend:${VERSION}"
 
-          echo "version=$VERSION"              >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION"               >> "$GITHUB_OUTPUT"
           echo "frontend_image=$FRONTEND_IMAGE" >> "$GITHUB_OUTPUT"
           echo "backend_image=$BACKEND_IMAGE"   >> "$GITHUB_OUTPUT"
 
@@ -144,7 +144,7 @@ jobs:
 
       # ── Docker BuildX for multi-platform support ───────────────────────────
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
+        uses: docker/setup-buildx-action@v3
 
       # ── Authenticate with Artifact Registry ────────────────────────────────
       - name: Authenticate with Google Cloud
@@ -193,36 +193,42 @@ jobs:
         uses: aquasecurity/trivy-action@master
         continue-on-error: true
         with:
-          image-ref: ${{ steps.version.outputs.frontend_image }}
-          format: 'sarif'
-          output: 'trivy-frontend.sarif'
-          severity: 'HIGH,CRITICAL'
-          exit-code: '0'
+          image-ref:      ${{ steps.version.outputs.frontend_image }}
+          format:         'sarif'
+          output:         'trivy-frontend.sarif'
+          severity:       'HIGH,CRITICAL'
+          exit-code:      '0'
           ignore-unfixed: true
 
       - name: Scan backend image with Trivy
         uses: aquasecurity/trivy-action@master
         continue-on-error: true
         with:
-          image-ref: ${{ steps.version.outputs.backend_image }}
-          format: 'sarif'
-          output: 'trivy-backend.sarif'
-          severity: 'HIGH,CRITICAL'
-          exit-code: '0'
+          image-ref:      ${{ steps.version.outputs.backend_image }}
+          format:         'sarif'
+          output:         'trivy-backend.sarif'
+          severity:       'HIGH,CRITICAL'
+          exit-code:      '0'
           ignore-unfixed: true
 
       # ── Upload scan results to GitHub Security tab ─────────────────────────
-      - name: Upload Trivy scan results
-        uses: github/codeql-action/upload-sarif@v4
+      # FIX: Each upload-sarif call MUST have a unique `category` when the same
+      #      tool (Trivy) produces multiple SARIF files in the same job.
+      #      Without this GitHub rejects the second upload with:
+      #      "only one run of upload-sarif is allowed per job per tool/category"
+      - name: Upload frontend Trivy results
+        uses: github/codeql-action/upload-sarif@v3
         if: always() && hashFiles('trivy-frontend.sarif') != ''
         with:
           sarif_file: trivy-frontend.sarif
+          category:   trivy-frontend          # ← unique category for frontend
 
       - name: Upload backend Trivy results
-        uses: github/codeql-action/upload-sarif@v4
+        uses: github/codeql-action/upload-sarif@v3
         if: always() && hashFiles('trivy-backend.sarif') != ''
         with:
           sarif_file: trivy-backend.sarif
+          category:   trivy-backend           # ← unique category for backend
 
       # ── Push images ONLY after scan passes ────────────────────────────────
       - name: Push frontend image to Artifact Registry
@@ -255,7 +261,7 @@ jobs:
       - name: CI Summary
         run: |
           echo "CI Pipeline completed"
-          echo "Version: ${{ needs.build-and-scan.outputs.version }}"
+          echo "Version:  ${{ needs.build-and-scan.outputs.version }}"
           echo "Frontend: ${{ needs.build-and-scan.outputs.frontend_image }}"
-          echo "Backend: ${{ needs.build-and-scan.outputs.backend_image }}"
-          echo "Status: ${{ needs.build-and-scan.result }}"
+          echo "Backend:  ${{ needs.build-and-scan.outputs.backend_image }}"
+          echo "Status:   ${{ needs.build-and-scan.result }}"
