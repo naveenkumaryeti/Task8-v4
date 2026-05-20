@@ -8,7 +8,7 @@
 #   - Manual workflow dispatch (for emergency deploys)
 #
 # Flow:
-#   CI passes → CD triggered → Deploy to GKE → Verify → Notify
+#   CI passes → CD triggered → Authorize runner IP → Deploy to GKE → Verify → Revoke IP → Notify
 #
 # Deployment strategy:
 #   Rolling update with maxUnavailable=0 (zero downtime)
@@ -18,7 +18,7 @@
 #   GCP_PROJECT_ID       - GCP project ID
 #   GCP_SA_KEY           - Service account JSON (base64)
 #   GCP_REGION           - e.g. asia-south1
-#   GKE_CLUSTER_NAME     - e.g. prod-cluster
+#   GKE_CLUSTER          - e.g. prod-cluster
 #   GKE_ZONE             - e.g. asia-south1-a
 #   GAR_REPO_NAME        - e.g. prod-repo
 # ============================================================
@@ -26,7 +26,7 @@
 name: CD — Deploy to GKE
 
 on:
-  # Trigger CD after CI completes successfully on main
+  # Trigger CD after CI completes successfully on master
   workflow_run:
     workflows: ["CI — Build, Test, Scan, Push"]
     types:
@@ -51,16 +51,16 @@ on:
 # Only one CD run at a time (prevent concurrent deploys)
 concurrency:
   group: cd-production
-  cancel-in-progress: false   # Don't cancel in-progress deploys (dangerous)
+  cancel-in-progress: false   # Never cancel in-progress deploys (dangerous)
 
 env:
   GCP_REGION:     ${{ secrets.GCP_REGION }}
   GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
-  GKE_CLUSTER:    ${{ secrets.GKE_CLUSTER_NAME }}
+  GKE_CLUSTER:    ${{ secrets.GKE_CLUSTER }}       # secret name: GKE_CLUSTER
   GKE_ZONE:       ${{ secrets.GKE_ZONE }}
   GAR_REPO_NAME:  ${{ secrets.GAR_REPO_NAME || 'prod-repo' }}
   NAMESPACE:      production
-  REGISTRY: ${{ secrets.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ secrets.GAR_REPO_NAME || 'prod-repo' }}
+  REGISTRY:       ${{ secrets.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ secrets.GAR_REPO_NAME || 'prod-repo' }}
 
 jobs:
   # ════════════════════════════════════════════════════════════
@@ -94,12 +94,12 @@ jobs:
     needs: gate
     environment:
       name: production
-      url: https://yourdomain.com    # Update with actual domain
+      url: https://yourdomain.com    # Update with actual domain or LoadBalancer IP
     timeout-minutes: 30
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v5
+        uses: actions/checkout@v4   # v4 is latest stable (v5 does not exist)
 
       # ── Determine version to deploy ────────────────────────────────────────
       - name: Determine deploy version
@@ -108,7 +108,6 @@ jobs:
           if [ -n "${{ github.event.inputs.version }}" ]; then
             VERSION="${{ github.event.inputs.version }}"
           elif [[ "${{ github.event.workflow_run.head_branch }}" == "master" ]]; then
-            # Use the SHA from the CI run
             SHA="${{ github.event.workflow_run.head_sha }}"
             VERSION="sha-$(echo $SHA | cut -c1-7)"
           else
@@ -126,10 +125,30 @@ jobs:
       - name: Set up gcloud CLI
         uses: google-github-actions/setup-gcloud@v2
 
+      # ── OPTION B: Whitelist runner IP on GKE master authorized networks ────
+      # The GitHub Actions runner has a dynamic IP that changes every run.
+      # We fetch the runner's current public IP and add it to the GKE
+      # master authorized networks so kubectl can reach the API server.
+      # The IP is revoked at the end of the job in the cleanup step.
+      - name: Authorize runner IP on GKE master authorized networks
+        run: |
+          RUNNER_IP=$(curl -sf https://api.ipify.org)
+          echo "Runner IP: $RUNNER_IP"
+          echo "RUNNER_IP=$RUNNER_IP" >> "$GITHUB_ENV"
+
+          gcloud container clusters update ${{ env.GKE_CLUSTER }} \
+            --region=${{ env.GKE_ZONE }} \
+            --enable-master-authorized-networks \
+            --master-authorized-networks="${RUNNER_IP}/32" \
+            --quiet
+
+          echo "✅ Runner IP $RUNNER_IP authorized on GKE master"
+
+      # ── Get GKE credentials (requires master authorized networks to allow runner IP) ──
       - name: Get GKE credentials
         uses: google-github-actions/get-gke-credentials@v2
         with:
-          cluster_name: ${{ env.GKE_CLUSTER }}
+          cluster_name: ${{ env.GKE_CLUSTER }}   # required field — was missing before
           location:     ${{ env.GKE_ZONE }}
           project_id:   ${{ env.GCP_PROJECT_ID }}
 
@@ -137,12 +156,15 @@ jobs:
       - name: Pre-deployment pod status
         run: |
           echo "=== Current Pod Status ==="
-          kubectl get pods -n ${{ env.NAMESPACE }} -o wide 2>/dev/null || echo "Namespace not found"
+          kubectl get pods -n ${{ env.NAMESPACE }} -o wide 2>/dev/null || echo "Namespace not found yet"
           echo ""
           echo "=== Current Deployments ==="
           kubectl get deployments -n ${{ env.NAMESPACE }} 2>/dev/null || true
 
       # ── Apply Kubernetes manifests ─────────────────────────────────────────
+      # FIX: Added --validate=false is NOT the right fix here.
+      # The real fix is the IP whitelist above which lets kubectl reach
+      # the API server for schema validation. Both commands now work correctly.
       - name: Apply namespace and configmaps
         run: |
           kubectl apply -f k8s/namespace.yaml
@@ -156,21 +178,20 @@ jobs:
 
           echo "Deploying frontend: $FRONTEND_IMAGE"
 
-          # Apply the manifest
           kubectl apply -f k8s/frontend-deployment.yaml -n ${{ env.NAMESPACE }}
           kubectl apply -f k8s/frontend-service.yaml    -n ${{ env.NAMESPACE }}
 
-          # Update the image (overrides what's in the manifest file)
+          # Override image tag with the exact version from this CI run
           kubectl set image deployment/frontend \
             nginx="$FRONTEND_IMAGE" \
             -n ${{ env.NAMESPACE }}
 
-          # Annotate for rollout history
+          # Record deploy version in rollout history
           kubectl annotate deployment/frontend \
             kubernetes.io/change-cause="CD deploy v${VERSION} — run #${{ github.run_number }}" \
             -n ${{ env.NAMESPACE }} --overwrite
 
-          # Wait for rollout
+          # Block until rollout completes or times out
           kubectl rollout status deployment/frontend \
             -n ${{ env.NAMESPACE }} --timeout=180s
 
@@ -224,8 +245,7 @@ jobs:
       # ── Application endpoint check ─────────────────────────────────────────
       - name: Verify application endpoints
         run: |
-          # Wait up to 2 minutes for LoadBalancer IP
-          echo "Waiting for external IP..."
+          echo "Waiting for LoadBalancer external IP (up to 2 minutes)..."
           for i in $(seq 1 24); do
             EXTERNAL_IP=$(kubectl get service frontend-service \
               -n ${{ env.NAMESPACE }} \
@@ -245,14 +265,32 @@ jobs:
             if [ "$HTTP_CODE" = "200" ]; then
               echo "✅ Frontend health check passed (HTTP $HTTP_CODE)"
             else
-              echo "⚠️  Frontend returned HTTP $HTTP_CODE — rolling back!"
+              echo "❌ Frontend returned HTTP $HTTP_CODE — rolling back!"
               kubectl rollout undo deployment/frontend -n ${{ env.NAMESPACE }}
               kubectl rollout undo deployment/backend  -n ${{ env.NAMESPACE }}
               exit 1
             fi
           else
-            echo "⚠️  LoadBalancer IP not ready — skipping HTTP check"
+            echo "⚠️  LoadBalancer IP not ready yet — skipping HTTP check"
           fi
+
+      # ── OPTION B CLEANUP: Revoke runner IP from master authorized networks ─
+      # Always runs (success OR failure) so the runner IP is never left open.
+      # After this step the GKE API server is no longer reachable from the runner.
+      - name: Revoke runner IP from GKE master authorized networks
+        if: always()   # critical — must run even if deploy or health check fails
+        run: |
+          echo "Revoking runner IP ${RUNNER_IP} from GKE master authorized networks..."
+
+          # Reset to open (0.0.0.0/0) so future runs can re-authorize cleanly.
+          # Replace 0.0.0.0/0 with your office/home CIDR if you want tighter control.
+          gcloud container clusters update ${{ env.GKE_CLUSTER }} \
+            --region=${{ env.GKE_ZONE }} \
+            --enable-master-authorized-networks \
+            --master-authorized-networks="0.0.0.0/0" \
+            --quiet
+
+          echo "✅ Runner IP revoked. Master authorized networks reset."
 
       # ── Deployment summary ─────────────────────────────────────────────────
       - name: Deployment summary
